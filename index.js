@@ -4,10 +4,9 @@ require("dotenv").config();
 const fs = require("node:fs");
 const path = require("node:path");
 const express = require("express");
-const cron = require("node-cron");
 const axios = require("axios");
+const Database = require("better-sqlite3");
 const { Telegraf, Markup } = require("telegraf");
-const { db, getDbSetting, setDbSetting } = require("./database");
 
 const PORT = Number(process.env.PORT || 3000);
 const TOKEN = process.env.TOKEN;
@@ -17,6 +16,44 @@ const FIVESIM_API_KEY = process.env.FIVESIM_API_KEY || "eyJhbGciOiJSUzUxMiIsInR5
 if (!TOKEN) {
   throw new Error("TOKEN is required in Environment Variables or .env");
 }
+
+// Database Setup
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
+fs.mkdirSync(DATA_DIR, { recursive: true });
+const DATABASE_FILE = path.join(DATA_DIR, "sms-bot.sqlite");
+
+const db = new Database(DATABASE_FILE);
+db.pragma("journal_mode = WAL");
+db.pragma("foreign_keys = ON");
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id INTEGER UNIQUE NOT NULL,
+    username TEXT,
+    first_name TEXT,
+    balance REAL DEFAULT 0.0,
+    is_banned INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id TEXT UNIQUE NOT NULL,
+    user_id INTEGER NOT NULL,
+    phone TEXT NOT NULL,
+    service TEXT NOT NULL,
+    cost REAL DEFAULT 0.0,
+    sms_code TEXT,
+    status TEXT DEFAULT 'PENDING',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS bot_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  );
+`);
 
 const bot = new Telegraf(TOKEN);
 const app = express();
@@ -61,7 +98,7 @@ function isAdmin(telegramId) {
   return Number(telegramId) === ADMIN_ID;
 }
 
-// Main Bottom Reply Keyboard
+// Bottom Reply Keyboard Layout
 function mainReplyKeyboard(ctx) {
   const buttons = [
     ["📱 নাম্বার কিনুন", "💰 ওয়ালেট"],
@@ -73,7 +110,7 @@ function mainReplyKeyboard(ctx) {
   return Markup.keyboard(buttons).resize();
 }
 
-// Inline Service Menu
+// Inline Service Selection Keyboard
 function serviceMenu() {
   return Markup.inlineKeyboard([
     [Markup.button.callback("Telegram ($0.50)", "buy:telegram:bangladesh")],
@@ -83,7 +120,7 @@ function serviceMenu() {
   ]);
 }
 
-// Set Left-Side Command Menu
+// Set Left-Side Command Menu Button
 async function setupBotCommands() {
   await bot.telegram.setMyCommands([
     { command: "start", description: "বট চালু করুন" },
@@ -95,7 +132,7 @@ async function setupBotCommands() {
   ]);
 }
 
-// Bot Middleware
+// Middleware
 bot.use((ctx, next) => {
   if (ctx.from) {
     registerUser(ctx);
@@ -105,7 +142,7 @@ bot.use((ctx, next) => {
   return next();
 });
 
-// Start Command
+// Bot Commands
 bot.start(async (ctx) => {
   const u = getUser(ctx.from.id);
   const text = `👋 **স্বাগতম Virtual Number Bot-এ!**\n\n💰 আপনার বর্তমান ওয়ালেট ব্যালেন্স: **$${u ? u.balance.toFixed(2) : "0.00"}**\n\nনিচের মেনু থেকে আপনার পছন্দমত সার্ভিস বেছে নিন:`;
@@ -118,7 +155,7 @@ bot.command("buy", (ctx) => {
 
 bot.command("balance", (ctx) => {
   const u = getUser(ctx.from.id);
-  ctx.reply(`💰 আপনার বর্তমান ব্যালেন্স: **$${u.balance.toFixed(2)}**`, { parse_mode: "Markdown" });
+  ctx.reply(`💰 আপনার বর্তমান ব্যালেন্স: **$${u ? u.balance.toFixed(2) : "0.00"}**`, { parse_mode: "Markdown" });
 });
 
 bot.command("history", (ctx) => {
@@ -132,20 +169,20 @@ bot.command("history", (ctx) => {
 });
 
 bot.command("help", (ctx) => {
-  ctx.reply("💡 **সহায়তা:**\n\n১. '📱 নাম্বার কিনুন' বাটনে ক্লিক করে সার্ভিস নির্বাচন করুন।\n২. পাওয়ার পর নাম্বারে OTP পাঠালে '📩 কোড দেখুন' বাটনে চাপ দিন।\n৩. ব্যালেন্স এড করতে এডমিনকে মেসেজ দিন।");
+  ctx.reply("💡 **সহায়তা:**\n\n১. '📱 নাম্বার কিনুন' বাটনে ক্লিক করে সার্ভিস নির্বাচন করুন।\n২. পাওয়ার পর নাম্বারে OTP পাঠালে '🔄 OTP রিফ্রেশ / চেক করুন' বাটনে চাপ দিন।\n৩. ব্যালেন্স এড করতে এডমিনকে মেসেজ দিন।");
 });
 
 // Bottom Keyboard Actions
 bot.hears("📱 নাম্বার কিনুন", (ctx) => ctx.reply("📱 **সার্ভিস নির্বাচন করুন:**", serviceMenu()));
 bot.hears("💰 ওয়ালেট", (ctx) => {
   const u = getUser(ctx.from.id);
-  ctx.reply(`💰 আপনার ওয়ালেট ব্যালেন্স: **$${u.balance.toFixed(2)}**`, { parse_mode: "Markdown" });
+  ctx.reply(`💰 আপনার ওয়ালেট ব্যালেন্স: **$${u ? u.balance.toFixed(2) : "0.00"}**`, { parse_mode: "Markdown" });
 });
 bot.hears("📜 ইতিহাস", (ctx) => ctx.telegram.sendMessage(ctx.chat.id, "/history"));
 bot.hears("💡 সাহায্য", (ctx) => ctx.telegram.sendMessage(ctx.chat.id, "/help"));
 bot.hears("🛡️ অ্যাডমিন প্যানেল", (ctx) => showAdmin(ctx));
 
-// Admin Actions
+// Admin Functions
 async function showAdmin(ctx) {
   if (!isAdmin(ctx.from.id)) return ctx.reply("❌ শুধুমাত্র অ্যাডমিনদের জন্য।");
   const menu = Markup.inlineKeyboard([
@@ -157,13 +194,13 @@ async function showAdmin(ctx) {
 
 bot.command("admin", showAdmin);
 
-// Callback Queries
+// Inline Action Callbacks
 bot.action(/^buy:(.+):(.+)$/, async (ctx) => {
   const [, service, country] = ctx.match;
   const price = service === "telegram" ? 0.5 : service === "whatsapp" ? 0.6 : 0.45;
   const u = getUser(ctx.from.id);
 
-  if (u.balance < price) {
+  if (!u || u.balance < price) {
     return ctx.answerCbQuery("❌ পর্যাপ্ত ব্যালেন্স নেই! রিচার্জ করুন।", { show_alert: true });
   }
 
@@ -194,7 +231,7 @@ bot.action(/^buy:(.+):(.+)$/, async (ctx) => {
   }
 });
 
-// Check OTP with Banner Format
+// Check OTP with Banner Display
 bot.action(/^check:(\d+)$/, async (ctx) => {
   const orderId = ctx.match[1];
   const orderDetails = await call5sim(`user/check/${orderId}`);
@@ -206,7 +243,7 @@ bot.action(/^check:(\d+)$/, async (ctx) => {
     db.prepare("UPDATE orders SET status = 'FINISHED', sms_code = ? WHERE order_id = ?").run(code, orderId);
 
     const bannerText =
-      `📱 **আপনার নাম্বার মেসেজ**\n\n` +
+      `📱 **আপনার নাম্বার তথ্য**\n\n` +
       `📞 **নাম্বার:** \`${orderDetails.phone}\`\n` +
       `🆔 **অর্ডার ID:** \`${orderId}\`\n\n` +
       `==============================\n` +
@@ -222,7 +259,7 @@ bot.action(/^check:(\d+)$/, async (ctx) => {
   }
 });
 
-// Cancel Order
+// Cancel Order Callback
 bot.action(/^cancel:(\d+)$/, async (ctx) => {
   const orderId = ctx.match[1];
   const res = await call5sim(`user/cancel/${orderId}`);
@@ -234,7 +271,7 @@ bot.action(/^cancel:(\d+)$/, async (ctx) => {
   }
 });
 
-// Admin Callbacks
+// Admin Callbacks & Commands
 bot.action("admin:stats", async (ctx) => {
   const profile = await call5sim("user/profile");
   const totalUsers = db.prepare("SELECT COUNT(*) AS count FROM users").get().count;
@@ -256,13 +293,13 @@ bot.command("addbalance", (ctx) => {
   bot.telegram.sendMessage(targetId, `🎉 আপনার ওয়ালেটে **$${amount}** ব্যালেন্স যোগ করা হয়েছে!`);
 });
 
-// Health Server
+// Express Server Setup
 app.get("/", (_req, res) => res.json({ ok: true, bot: "5sim-sms-bot" }));
 app.listen(PORT, () => console.log(`Server listening on ${PORT}`));
 
-// Launch
+// Start Bot
 setupBotCommands().then(() => {
-  bot.launch().then(() => console.log("Bot running with Menu & Keyboard settings!"));
+  bot.launch().then(() => console.log("Bot running with Custom Keyboard & Command Menu!"));
 });
 
 process.once("SIGINT", () => bot.stop("SIGINT"));
